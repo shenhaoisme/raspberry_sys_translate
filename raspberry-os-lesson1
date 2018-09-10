@@ -1,0 +1,67 @@
+#Makefile
+#ARMGNU 想在x86上编译arm64的代码，就需要这个交叉编译的前缀。
+ARMGNU ?= aarch64-linux-gnu
+#当编译c 和 汇编代码
+#-wall warning all
+#-nostdlib 不使用标准库，大多数调用标准库的都需要与os交互，我们在写一个简单的程序。不需要任何OS。
+#-nostartfiles 不使用startup文件，startup文件的责任是设定一个栈指针，初始化静态变量，并且跳转到main函数进口点，但我们打算什么都自己做！
+#-ffreestanding 标准库不存在了环境，startup有没有之前的意义，就是告诉编译器标准函数失去了通常的意义
+#Iinclude
+#mgeneral-regs-only 使用通用的寄存器，因为ARM还有NEON，我们不想让编译器用这个玩意。
+COPS = -Wall -nostdlib -nostartfiles -ffreestanding -Iinclude -mgeneral-regs-only
+ASMOPS = -Iinclude 
+#build里都是.o files
+BUILD_DIR = build
+SRC_DIR = src
+#上面都是变量定义，两个target，all作为第一个默认的target。
+all : kernel8.img
+
+clean :
+    rm -rf $(BUILD_DIR) *.img 
+#接下来是为了编译c和汇编，比如我们src里有foo.c foo.s 我们会生成 build/foo_c.o & build/foo_s.o
+#个别的 $< $@是运行的时候被输入取代，并且以filename输出，
+$(BUILD_DIR)/%_c.o: $(SRC_DIR)/%.c
+    mkdir -p $(@D)
+    $(ARMGNU)-gcc $(COPS) -MMD -c $< -o $@
+
+$(BUILD_DIR)/%_s.o: $(SRC_DIR)/%.S
+    $(ARMGNU)-gcc $(ASMOPS) -MMD -c $< -o $@
+#这里我们构建一个由C和汇编源文件串联创建的所有目标文件（OBJ_FILES）的数组。
+C_FILES = $(wildcard $(SRC_DIR)/*.c)
+ASM_FILES = $(wildcard $(SRC_DIR)/*.S)
+OBJ_FILES = $(C_FILES:$(SRC_DIR)/%.c=$(BUILD_DIR)/%_c.o)
+OBJ_FILES += $(ASM_FILES:$(SRC_DIR)/%.S=$(BUILD_DIR)/%_s.o)
+#如果想看我们如何定义c和汇编文件的编译目标，你会注意到我使用了 -MMD，此参数之指示了gcc编译器为每个
+#生成的目标文件创建依赖项，这些依赖项一般都是一堆头文件，我们需要含所有生成的依赖项文件，以便make知道
+#在标题更改时要重新编译的确切内容。
+DEP_FILES = $(OBJ_FILES:%.o=%.d)
+-include $(DEP_FILES)
+#我们使用OBJ_FILES 数组去build kernel8_dlf文件，我们使用链接脚本去定义可执行img的基本布局
+#kernl.elf 是ELF格式，问题是ELF对OS来说可执行的。我们需要从这个img里提取可执行部分和数据。
+#kernel8 这个8 指的是armv8，告诉固件启动处理器在64bit模式启动（通过config.txt arm_control=0x200
+#RPi OS以前使用过这种方法，你仍然可以在一些练习答案中找到它。 但是，arm_control标志是未记录的，最好使用kernel8.img命名约定。
+kernel8.img: $(SRC_DIR)/linker.ld $(OBJ_FILES)
+    $(ARMGNU)-ld -T $(SRC_DIR)/linker.ld -o $(BUILD_DIR)/kernel8.elf  $(OBJ_FILES)
+    $(ARMGNU)-objcopy $(BUILD_DIR)/kernel8.elf -O binary kernel8.img
+The linker script    
+链接脚本最初的意义是描述section怎样去输入文件：_c.0 & _s.o，这些文件应该被关联到输出文件（.elf） 。
+SECTIONS
+{
+    .text.boot : { *(.text.boot) }
+    .text :  { *(.text) }
+    .rodata : { *(.rodata) }
+    .data : { *(.data) }
+    . = ALIGN(0x8);
+    bss_begin = .;
+    .bss : { *(.bss*) } 
+    bss_end = .;
+}
+#在startup之后，rasp会装载kernel8.img到储存器，在文件的开头开始执行，这就是为什么 .text.boot在前面，我们打算把OS startup代码也
+#放进这个section。.text .rodata .data包含内核编译指令，只读数据，和一般数据。.bss 里的数据被初始化为0，通过把数据放到各自的分区，
+#编译器会在ELF binary里存放一些空间，elf的头文件存放section的大小，但该部分本身被省略。 将img加载到内存后，我们必须将.bss部分初始化为0; 
+#这就是为什么我们需要记录该section的开始和结束（因此bss_begin和bss_end符号）并对齐该部分，使其从一个8的倍数开始。如果该部分未对齐，则会更多
+# 难以使用str指令在bss部分的开头存储0，因为str指令只能用于8字节对齐的地址。
+
+The linker script
+
+
